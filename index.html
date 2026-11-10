@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Рандомайзер группы</title>
+<style>
+  :root { --bg:#f6f6f8; --card:#fff; --text:#1c1c1e; --muted:#6b6b74; --accent:#2a7de1; --line:#e2e2e8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17181c; --card:#22242a; --text:#ececf0; --muted:#9a9aa6; --accent:#5aa2ff; --line:#33363e; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:24px 16px 48px; }
+  h1 { font-size:24px; margin:0 0 16px; }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:16px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; }
+  button, .btn { font:inherit; border:1px solid var(--line); background:var(--card); color:var(--text); padding:10px 14px; border-radius:10px; cursor:pointer; text-decoration:none; display:inline-block; }
+  button.main { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button:disabled { opacity:.4; cursor:default; }
+  button:hover:not(:disabled), .btn:hover { filter:brightness(.95); }
+  .meta { font-size:14px; color:var(--muted); margin-bottom:8px; }
+  .text { white-space:pre-wrap; word-break:break-word; margin:8px 0 14px; font-size:17px; }
+  a { color:var(--accent); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎲 Рандомайзер группы</h1>
+
+  <section id="load" class="box">
+    <p><b>Загрузите файл экспорта чата</b> (<code>result.json</code> из Telegram Desktop).</p>
+    <input type="file" id="file" accept=".json,application/json">
+    <p id="status" class="muted"></p>
+  </section>
+
+  <section id="app" hidden>
+    <div class="box">
+      <div id="buttons" class="row"></div>
+      <p class="muted" id="info" style="margin-bottom:0"></p>
+    </div>
+    <div id="card" class="box" hidden></div>
+    <button id="reload" class="muted">Загрузить другой файл</button>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const STORE_KEY = 'tg-randomizer-v1';
+let db = null;            // { chat, topics:[{id,title,posts:[...]}] }
+let seen = new Set();     // уже выпавшие посты (в рамках сессии)
+
+// ---------- загрузка файла ----------
+$('file').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  $('status').textContent = 'Читаю файл…';
+  try {
+    const raw = JSON.parse(await f.text());
+    db = convert(raw);
+  } catch (err) {
+    $('status').textContent = 'Не удалось прочитать файл. Нужен result.json в формате JSON.';
+    return;
+  }
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); } catch (_) {}
+  show();
+});
+
+$('reload').addEventListener('click', () => {
+  try { localStorage.removeItem(STORE_KEY); } catch (_) {}
+  db = null; seen = new Set();
+  $('app').hidden = true; $('load').hidden = false; $('card').hidden = true;
+  $('status').textContent = ''; $('file').value = '';
+});
+
+// ---------- разбор экспорта ----------
+function textOf(m) {
+  if (typeof m.text === 'string') return m.text;
+  if (Array.isArray(m.text)) return m.text.map(p => typeof p === 'string' ? p : (p.text || '')).join('');
+  return '';
+}
+
+function convert(raw) {
+  const msgs = raw.messages || [];
+  const topics = {};
+  for (const m of msgs) {
+    if (m.type === 'service' && m.action === 'topic_created') {
+      topics[m.id] = { id: m.id, title: m.title || ('Тема ' + m.id), posts: [] };
+    }
+  }
+  const general = { id: 0, title: 'Общая (без темы)', posts: [] };
+  for (const m of msgs) {
+    if (m.type !== 'message') continue;
+    const text = textOf(m).trim();
+    const media = m.media_type || (m.photo ? 'photo' : (m.file ? 'file' : ''));
+    if (!text && !media) continue;
+    const post = { id: m.id, date: m.date || '', from: m.from || '', text, media };
+    const t = topics[m.reply_to_message_id];
+    if (t) t.posts.push(post);
+    else if (!m.reply_to_message_id) general.posts.push(post);
+  }
+  const list = Object.values(topics);
+  if (general.posts.length) list.push(general);
+  const chat = String(raw.id || '').replace(/^-?100/, '');
+  return { chat, topics: list };
+}
+
+// ---------- интерфейс ----------
+function show() {
+  $('load').hidden = true;
+  $('app').hidden = false;
+  const box = $('buttons');
+  box.textContent = '';
+
+  const any = document.createElement('button');
+  any.className = 'main';
+  any.textContent = '🎲 Любая тема';
+  any.onclick = () => roll(null);
+  box.appendChild(any);
+
+  let total = 0;
+  for (const t of db.topics) {
+    total += t.posts.length;
+    const b = document.createElement('button');
+    b.textContent = t.title + ' (' + t.posts.length + ')';
+    b.disabled = t.posts.length === 0;
+    b.onclick = () => roll(t);
+    box.appendChild(b);
+  }
+  any.disabled = total === 0;
+  $('info').textContent = total
+    ? 'Всего постов: ' + total + '. Выпавшие не повторяются, пока не кончится круг.'
+    : 'Постов не найдено. Возможно, в экспорте нет тем. Напишите об этом Claude.';
+}
+
+let lastScopeIsAny = false;  // «Ещё раз» повторяет тот же выбор (тема или любая)
+
+function roll(topic) {
+  lastScopeIsAny = !topic;
+  const withPosts = db.topics.filter(t => t.posts.length);
+  if (!withPosts.length) return;
+  const t = topic || withPosts[Math.floor(Math.random() * withPosts.length)];
+
+  let pool = t.posts.filter(p => !seen.has(t.id + ':' + p.id));
+  let note = '';
+  if (!pool.length) {
+    for (const p of t.posts) seen.delete(t.id + ':' + p.id);
+    pool = t.posts;
+    note = 'Круг закончился, начинаем заново.';
+  }
+  const p = pool[Math.floor(Math.random() * pool.length)];
+  seen.add(t.id + ':' + p.id);
+  render(t, p, note);
+}
+
+function linkify(container, text) {
+  const re = /https?:\/\/[^\s]+/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    container.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const a = document.createElement('a');
+    a.href = m[0]; a.textContent = m[0]; a.target = '_blank'; a.rel = 'noopener';
+    container.appendChild(a);
+    last = m.index + m[0].length;
+  }
+  container.appendChild(document.createTextNode(text.slice(last)));
+}
+
+function render(t, p, note) {
+  const card = $('card');
+  card.textContent = '';
+  card.hidden = false;
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const d = p.date ? p.date.replace('T', ' ').slice(0, 16) : '';
+  meta.textContent = [t.title, p.from, d].filter(Boolean).join(' · ');
+  card.appendChild(meta);
+
+  if (p.text) {
+    const tx = document.createElement('div');
+    tx.className = 'text';
+    linkify(tx, p.text);
+    card.appendChild(tx);
+  }
+  if (p.media) {
+    const md = document.createElement('div');
+    md.className = 'muted';
+    md.textContent = '📎 К посту приложено вложение (' + p.media + '), его можно посмотреть в Telegram.';
+    md.style.marginBottom = '12px';
+    card.appendChild(md);
+  }
+
+  const row = document.createElement('div');
+  row.className = 'row';
+
+  if (db.chat) {
+    const a = document.createElement('a');
+    a.className = 'btn main';
+    a.style.cssText = 'background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600';
+    a.target = '_blank'; a.rel = 'noopener';
+    a.href = 'https://t.me/c/' + db.chat + '/' + p.id + (t.id ? '?thread=' + t.id : '');
+    a.textContent = 'Открыть в Telegram';
+    row.appendChild(a);
+  }
+  const again = document.createElement('button');
+  again.textContent = '🎲 Ещё раз';
+  const anyScope = lastScopeIsAny;
+  again.onclick = () => roll(anyScope ? null : t);
+  row.appendChild(again);
+  card.appendChild(row);
+
+  if (note) {
+    const n = document.createElement('p');
+    n.className = 'muted';
+    n.textContent = note;
+    card.appendChild(n);
+  }
+}
+
+// ---------- автозагрузка сохранённых данных ----------
+try {
+  const saved = localStorage.getItem(STORE_KEY);
+  if (saved) { db = JSON.parse(saved); show(); }
+} catch (_) {}
+</script>
+</body>
+</html>
